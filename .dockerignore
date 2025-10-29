@@ -1,0 +1,28 @@
+# Docker files
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Git repository files
+.git
+.gitignore
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Local environments (these should never be copied)
+venv/
+.venv/
+env/
+
+# Conda cache
+.conda/
+
+# Database file (we will mount this as a volume instead)
+server/chat_server.db
+
+# IDE configuration
+.vscode/
+.idea/
