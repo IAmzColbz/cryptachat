@@ -1,4 +1,4 @@
-# CryptaChat Server
+# CryptaChat Server (Early Alpha)
 
 CryptaChat Server is a simple, secure backend for an End-to-End Encrypted (E2EE) chat application. It is built with Python and Flask.
 
@@ -16,7 +16,7 @@ The server's primary role is *not* to see unencrypted messages, but to manage us
 ## Technology Stack
 
 * **Backend**: Python 3, Flask
-* **Database**: SQLite
+* **Database**: **PostgreSQL** (The project recently migrated from SQLite)
 * **Authentication**: PyJWT
 * **Password Hashing**: Werkzeug
 * **Security**: `flask-limiter` for rate limiting
@@ -27,15 +27,18 @@ The server's primary role is *not* to see unencrypted messages, but to manage us
 
 This is the easiest way to get the server running with a persistent database.
 
-1.  **Save the Code**: Make sure all the updated files (`Dockerfile`, `requirements.txt`, `server/server.py`, `docker-compose.yml`) are saved in your project directory.
-2.  **Start Docker Desktop**: Ensure the Docker Desktop application is running.
-3.  **Build and Run**: From your terminal, run:
+1.  **Save the Code**: Make sure all the updated files (`Dockerfile`, `requirements.txt`, `server/server.py`, `docker-compose.yml`, `.config/docker.env`, `server/schema.sql`) are saved in your project directory.
+2.  **Configure Environment**: The `.config/docker.env` file holds the database credentials. **WARNING:** For production, you must change the default `POSTGRES_USER` and `POSTGRES_PASSWORD` from the examples.
+3.  **Start Docker Desktop**: Ensure the Docker Desktop application is running.
+4.  **Build and Run**: From your terminal, run:
     ```bash
     docker compose up --build
     ```
-4.  The server will build the image, start, initialize the `chat_server.db` file within the Docker volume, and be accessible at `http://localhost:5000`.
+5.  The server will build the image, start, initialize the **PostgreSQL database** within the persistent Docker volume (`pgdata`), and be accessible at `http://localhost:5000`.
 
 ## How to Run (Manual/Local Development)
+
+**NOTE:** This method now requires you to have a **PostgreSQL database running** and accessible at the host/port specified in `../.config/docker.env`.
 
 1.  **Create Conda Environment**:
     ```bash
@@ -53,7 +56,7 @@ This is the easiest way to get the server running with a persistent database.
     ```bash
     python server/server.py
     ```
-    The server will create a local `chat_server.db` file and start on `http://127.0.0.1:5000`.
+    The server will attempt to connect to the PostgreSQL host specified in `../.config/docker.env` and initialize the tables, then start on `http://127.0.0.1:5000`.
 
 ## API Endpoints
 
@@ -72,4 +75,4 @@ All protected routes require an `Authorization: Bearer <token>` header. Rate lim
 
 ## Admin Client
 
-The repository includes a Tkinter-based GUI admin tool (`server/admin_client.py`). This is a separate desktop application you can run locally to directly inspect and manage the `chat_server.db` database file, whether it's running locally or in the Docker volume.
+**NOTE: The `server/admin_client.py` is currently non-functional and unsupported.** This script was designed to connect directly to the older **SQLite** database (`chat_server.db`). Since the server has been migrated to PostgreSQL, the admin client must be completely rewritten to connect to a remote PostgreSQL instance over the network.
