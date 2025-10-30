@@ -1,6 +1,7 @@
 FROM continuumio/miniconda3:25.3.1-1
 
-WORKDIR /server
+# Set the working directory for the application
+WORKDIR /app
 
 # 1. Copy and create the conda env
 COPY environment.yml .
@@ -13,8 +14,12 @@ SHELL ["conda", "run", "-n", "venv", "/bin/bash", "-c"]
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# 4. Copy the rest of the application code
+# (This copies the 'server' folder into /app/server)
 COPY . .
 
 EXPOSE 5000
 
-CMD ["/opt/conda/envs/e2ee-env/bin/python", "./server/server.py"]
+# 5. Correct CMD
+# Runs 'python server/server.py' from the /app directory
+CMD ["/opt/conda/envs/venv/bin/python", "server/server.py"]

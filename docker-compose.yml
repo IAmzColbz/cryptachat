@@ -1,0 +1,43 @@
+services:
+  web:
+    build: .
+    image: cryptachat-server
+    restart: always
+    # This service depends on the 'db' service being healthy
+    depends_on:
+      db:
+        condition: service_healthy
+    # Read environment variables from the .env file
+    env_file:
+      - ./.config/docker.env
+    ports:
+      - "5000:5000"
+    # Connect to the custom 'chat-net' network
+    networks:
+      - chat-net
+
+  db:
+    image: postgres:16-alpine
+    restart: always
+    # Read the same .env file for PG credentials
+    env_file:
+      - ./.config/docker.env
+    volumes:
+      # Persist the PostgreSQL data to a named volume
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - chat-net
+    # Healthcheck to see if Postgres is ready to accept connections
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+# Define the custom network
+networks:
+  chat-net:
+
+# Define the named volume for persistent data
+volumes:
+  pgdata:

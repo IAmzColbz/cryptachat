@@ -2,6 +2,7 @@
 Dockerfile
 .dockerignore
 docker-compose.yml
+.config
 
 # Git repository files
 .git
@@ -19,9 +20,6 @@ env/
 
 # Conda cache
 .conda/
-
-# Database file (we will mount this as a volume instead)
-server/chat_server.db
 
 # IDE configuration
 .vscode/
