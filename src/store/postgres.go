@@ -309,20 +309,23 @@ func (s *PostgresStore) GetContacts(ctx context.Context, myID int) ([]string, er
 // ---- Message Methods ----
 
 // SendMessage inserts a new encrypted message.
-func (s *PostgresStore) SendMessage(ctx context.Context, senderID int, recipientUsername, senderBlob, recipientBlob string) error {
+func (s *PostgresStore) SendMessage(ctx context.Context, senderID int, recipientUsername, senderBlob, recipientBlob string) (int, int, error) {
 	recipientID, err := s.GetUserIDByUsername(ctx, recipientUsername)
 	if err != nil {
-		return fmt.Errorf("recipient user not found")
+		return 0, 0, fmt.Errorf("recipient user not found")
 	}
 
-	_, err = s.db.Exec(ctx,
-		"INSERT INTO messages (sender_id, recipient_id, sender_blob, recipient_blob) VALUES ($1, $2, $3, $4)",
+	var newID int
+	// Use QueryRow with RETURNING id to get the new message's ID
+	err = s.db.QueryRow(ctx,
+		"INSERT INTO messages (sender_id, recipient_id, sender_blob, recipient_blob) VALUES ($1, $2, $3, $4) RETURNING id",
 		senderID, recipientID, senderBlob, recipientBlob,
-	)
+	).Scan(&newID)
+
 	if err != nil {
-		return fmt.Errorf("database error: %v", err)
+		return 0, 0, fmt.Errorf("database error: %v", err)
 	}
-	return nil
+	return newID, recipientID, nil
 }
 
 // Message struct for get_messages response
@@ -333,6 +336,39 @@ type Message struct {
 	Timestamp      time.Time `json:"timestamp"`
 	SenderUsername string    `json:"sender_username"`
 	EncryptedBlob  string    `json:"encrypted_blob"`
+}
+
+// --- NEW FUNCTION ---
+// GetMessageForUser fetches a single message, formatted for a specific user's perspective (to get the correct blob).
+func (s *PostgresStore) GetMessageForUser(ctx context.Context, messageID int, perspectiveUserID int) (*Message, error) {
+	var msg Message
+	// This query is based on GetMessages, but for a single ID
+	err := s.db.QueryRow(ctx,
+		`
+        SELECT 
+            m.id, 
+            m.sender_id, 
+            m.recipient_id, 
+            m.timestamp, 
+            u_sender.username AS sender_username,
+            CASE
+                WHEN m.sender_id = $1 THEN m.sender_blob
+                ELSE m.recipient_blob
+            END AS encrypted_blob
+        FROM messages m
+        JOIN users u_sender ON u_sender.id = m.sender_id
+        WHERE m.id = $2
+        `,
+		perspectiveUserID, messageID,
+	).Scan(&msg.ID, &msg.SenderID, &msg.RecipientID, &msg.Timestamp, &msg.SenderUsername, &msg.EncryptedBlob)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("message not found")
+		}
+		return nil, fmt.Errorf("database scan error: %v", err)
+	}
+	return &msg, nil
 }
 
 // GetMessages fetches new messages between two users.

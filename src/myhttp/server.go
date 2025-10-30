@@ -3,6 +3,7 @@ package myhttp
 import (
 	"cryptachat-server/config"
 	"cryptachat-server/store" // Your store package
+	"cryptachat-server/websockets"
 	"net/http"
 )
 
@@ -10,15 +11,17 @@ import (
 type Server struct {
 	store *store.PostgresStore
 	cfg   *config.Config
-	mux   *http.ServeMux // The HTTP router
+	mux   *http.ServeMux
+	hub   *websockets.Hub // <-- Add the hub
 }
 
 // NewServer creates a new server instance.
-func NewServer(cfg *config.Config, store *store.PostgresStore) *Server {
+func NewServer(cfg *config.Config, store *store.PostgresStore, hub *websockets.Hub) *Server {
 	s := &Server{
 		store: store,
 		cfg:   cfg,
 		mux:   http.NewServeMux(),
+		hub:   hub, // <-- Set the hub
 	}
 	s.registerRoutes() // Call the method to register all routes
 	return s
@@ -50,5 +53,11 @@ func (s *Server) registerRoutes() {
 
 	// Message routes (Protected)
 	s.mux.HandleFunc("POST /send_message", s.jwtAuthMiddleware(s.handleSendMessage()))
+	// The /get_messages route is still useful for loading history
 	s.mux.HandleFunc("GET /get_messages", s.jwtAuthMiddleware(s.handleGetMessages()))
+
+	// --- New WebSocket Route ---
+	// This route is protected by JWT auth.
+	// It will upgrade the connection and register the client with the hub.
+	s.mux.HandleFunc("GET /ws", s.jwtAuthMiddleware(s.handleServeWS()))
 }

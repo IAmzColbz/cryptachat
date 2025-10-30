@@ -3,6 +3,7 @@ package myhttp
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -334,7 +335,8 @@ func (s *Server) handleSendMessage() http.HandlerFunc {
 			return
 		}
 
-		err := s.store.SendMessage(r.Context(), currentUser.ID, payload.RecipientUsername, payload.SenderBlob, payload.RecipientBlob)
+		// 1. Send message and get back the new message's ID and the recipient's ID
+		newID, recipientID, err := s.store.SendMessage(r.Context(), currentUser.ID, payload.RecipientUsername, payload.SenderBlob, payload.RecipientBlob)
 		if err != nil {
 			if strings.Contains(err.Error(), "recipient user not found") {
 				s.writeJSONError(w, "Recipient user not found.", http.StatusNotFound)
@@ -344,6 +346,28 @@ func (s *Server) handleSendMessage() http.HandlerFunc {
 			return
 		}
 
+		// --- WebSocket Push Logic ---
+		// 2. Get the message object as the SENDER sees it
+		msgForSender, err := s.store.GetMessageForUser(r.Context(), newID, currentUser.ID)
+		if err != nil {
+			// Log this, but don't fail the HTTP request. The message is saved.
+			log.Printf("WS: could not get message %d for sender %d: %v", newID, currentUser.ID, err)
+		} else {
+			// 3. Push to sender's websocket (so all their devices get the new message)
+			s.hub.PushToUser(currentUser.ID, msgForSender)
+		}
+
+		// 4. Get the message object as the RECIPIENT sees it
+		msgForRecipient, err := s.store.GetMessageForUser(r.Context(), newID, recipientID)
+		if err != nil {
+			log.Printf("WS: could not get message %d for recipient %d: %v", newID, recipientID, err)
+		} else {
+			// 5. Push to recipient's websocket
+			s.hub.PushToUser(recipientID, msgForRecipient)
+		}
+		// --- End WebSocket Push Logic ---
+
+		// 6. Send original HTTP success response
 		s.writeJSON(w, map[string]string{"message": "Message sent successfully."}, http.StatusCreated)
 	}
 }

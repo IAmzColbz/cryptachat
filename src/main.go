@@ -6,37 +6,43 @@ import (
 	"os"
 
 	"cryptachat-server/config"
-	"cryptachat-server/myhttp" // Your new http package
+	"cryptachat-server/myhttp" // Your http package
 	"cryptachat-server/store"
+	"cryptachat-server/websockets" // <-- Import the new websocket package
 )
 
 func main() {
-	// Load config. This will load from .config/docker.env for local dev
-	// or from environment variables (injected by Docker Compose) in production.
 	cfg, err := config.LoadConfig("../.config/docker.env")
 	if err != nil {
 		log.Printf("Warning: could not load .env file. Will rely on environment variables. Error: %v", err)
-		// Try again, this time relying *only* on environment variables
 		cfg, err = config.LoadConfig("")
 		if err != nil {
 			log.Fatalf("FATAL: could not load configuration from environment: %v", err)
 		}
 	}
 
-	// *** FIX: Changed path from "../server/schema.sql" to "./server/schema.sql" ***
-	// This path is now correct relative to the binary's location in the /app container directory
+	// ... (database connection logic)
 	dbStore, err := store.NewPostgresStore(cfg.DatabaseURL, "./store/schema.sql")
 	if err != nil {
 		log.Fatalf("FATAL: could not connect to database: %v", err)
 	}
-	defer dbStore.Close() // Make sure to close the DB connection on exit
+	defer dbStore.Close()
 	log.Println("Database connection established and schema initialized.")
 
+	// --- WebSocket Hub ---
+	// 1. Create the new hub
+	hub := websockets.NewHub()
+	// 2. Run the hub in its own goroutine
+	go hub.Run()
+	log.Println("WebSocket hub initialized and running.")
+	// ---------------------
+
 	// Init http
-	server := myhttp.NewServer(cfg, dbStore)
+	// 3. Pass the hub to the server
+	server := myhttp.NewServer(cfg, dbStore, hub)
 	log.Println("HTTP server initialized.")
 
-	// Get port from environment, default to 5000
+	// ... (port logic)
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "5000"
