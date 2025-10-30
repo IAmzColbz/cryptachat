@@ -25,7 +25,7 @@ func LoadConfig(path string) (*Config, error) {
 		dbHost:     os.Getenv("DB_HOST"),
 		dbPort:     os.Getenv("DB_PORT"),
 		dbUser:     os.Getenv("POSTGRES_USER"),
-		dbPassword: os.Getenv("POSTGRESS_PASSWORD"),
+		dbPassword: os.Getenv("POSTGRES_PASSWORD"),
 		dbName:     os.Getenv("POSTGRES_DB"),
 		JWTSecret:  os.Getenv("SECRET_KEY"),
 	}
