@@ -26,14 +26,29 @@ func NewServer(cfg *config.Config, store *store.PostgresStore) *Server {
 
 // ServeHTTP makes our Server usable as an http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// TODO: Add logging middleware here
 	s.mux.ServeHTTP(w, r)
 }
 
 // registerRoutes is the Go equivalent of all your @app.route decorators.
+// TODO: Add rate limiting, similar to the Python server's 'flask-limiter'.
+// This can be done by wrapping handlers with a rate-limiting middleware.
 func (s *Server) registerRoutes() {
+	// Auth routes
 	s.mux.HandleFunc("POST /register", s.handleRegister())
-	// TODO: Add other routes
-	// s.mux.HandleFunc("POST /login", s.handleLogin())
-	// s.mux.HandleFunc("POST /upload_key", s.handleUploadKey())
-	// ...
+	s.mux.HandleFunc("POST /login", s.handleLogin())
+
+	// Key routes (Protected)
+	s.mux.HandleFunc("POST /upload_key", s.jwtAuthMiddleware(s.handleUploadKey()))
+	s.mux.HandleFunc("GET /get_key", s.jwtAuthMiddleware(s.handleGetKey()))
+
+	// Chat/Contact routes (Protected)
+	s.mux.HandleFunc("POST /request_chat", s.jwtAuthMiddleware(s.handleRequestChat()))
+	s.mux.HandleFunc("GET /get_chat_requests", s.jwtAuthMiddleware(s.handleGetChatRequests()))
+	s.mux.HandleFunc("POST /accept_chat", s.jwtAuthMiddleware(s.handleAcceptChat()))
+	s.mux.HandleFunc("GET /get_contacts", s.jwtAuthMiddleware(s.handleGetContacts()))
+
+	// Message routes (Protected)
+	s.mux.HandleFunc("POST /send_message", s.jwtAuthMiddleware(s.handleSendMessage()))
+	s.mux.HandleFunc("GET /get_messages", s.jwtAuthMiddleware(s.handleGetMessages()))
 }

@@ -2,13 +2,12 @@ package http
 
 import (
 	"context"
+	"cryptachat-server/store" // Import the store package
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
-	// You'll need to define a User struct, probably in your store package
-	// "cryptachat-server/store"
 )
 
 // A custom context key to pass user info
@@ -48,29 +47,35 @@ func (s *Server) jwtAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		})
 
 		if err != nil {
-			s.writeJSONError(w, fmt.Sprintf("Token is invalid: %v", err), http.StatusUnauthorized)
+			if err == jwt.ErrTokenExpired {
+				s.writeJSONError(w, "Token has expired!", http.StatusUnauthorized)
+			} else {
+				s.writeJSONError(w, fmt.Sprintf("Token is invalid: %v", err), http.StatusUnauthorized)
+			}
 			return
 		}
 
 		if claims, ok := token.Claims.(*AppClaims); ok && token.Valid {
 			// In your Python code, you double-check the user against the DB.
-			// You should do that here, too!
-			// user, err := s.store.GetUserByID(r.Context(), claims.UserID)
-			// if err != nil || user == nil {
-			// 	 s.writeJSONError(w, "Token is invalid!", http.StatusUnauthorized)
-			// 	 return
-			// }
+			// This is critical, and we do it here.
+			user, err := s.store.GetUserByID(r.Context(), claims.UserID)
+			if err != nil || user == nil {
+				s.writeJSONError(w, "Token is invalid!", http.StatusUnauthorized)
+				return
+			}
 
 			// This is the Go way to pass "current_user" to the next handler
-			// ctx := context.WithValue(r.Context(), userContextKey, user)
-			// next.ServeHTTP(w, r.WithContext(ctx))
-
-			// For this example, we'll just pass the claims
-			ctx := context.WithValue(r.Context(), userContextKey, claims)
+			ctx := context.WithValue(r.Context(), userContextKey, user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 
 		} else {
 			s.writeJSONError(w, "Token is invalid!", http.StatusUnauthorized)
 		}
 	}
+}
+
+// getUserFromContext is a helper to retrieve the user from the context.
+func (s *Server) getUserFromContext(r *http.Request) (*store.User, bool) {
+	user, ok := r.Context().Value(userContextKey).(*store.User)
+	return user, ok
 }
