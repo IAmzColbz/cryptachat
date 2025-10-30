@@ -1,16 +1,42 @@
-import sqlite3
+import os
+import time
 import datetime
-import jwt # PyJWT - pip install PyJWT
+import jwt # PyJWT
+import psycopg2
+import psycopg2.extras # For DictCursor
 from functools import wraps
 from flask import Flask, request, jsonify, g
 from werkzeug.security import generate_password_hash, check_password_hash
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+# This is useful for local dev; Docker Compose handles it in production
+load_dotenv(dotenv_path='../.config/docker.env') 
 
 # --- CONFIGURATION ---
-DATABASE = 'chat_server.db'
-SECRET_KEY = 'a-very-secret-key-that-you-should-change' # Used for signing JWT tokens
+SECRET_KEY = os.getenv('SECRET_KEY', 'a-very-secret-key-that-you-should-change')
+
+# Build database URL from environment variables
+DB_NAME = os.getenv('POSTGRES_DB')
+DB_USER = os.getenv('POSTGRES_USER')
+DB_PASS = os.getenv('POSTGRES_PASSWORD')
+DB_HOST = os.getenv('DB_HOST')
+DB_PORT = os.getenv('DB_PORT')
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
+
+# --- RATE LIMITING ---
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",
+    strategy="fixed-window"
+)
 
 # --- DATABASE HELPERS ---
 
@@ -18,8 +44,14 @@ def get_db():
     """Get a database connection from the Flask global context."""
     db = getattr(g, '_database', None)
     if db is None:
-        db = g._database = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
+        try:
+            db = g._database = psycopg2.connect(DATABASE_URL)
+        except psycopg2.OperationalError as e:
+            app.logger.error(f"Failed to connect to database: {e}")
+            # This might happen if the DB is not ready, even with healthcheck
+            time.sleep(1) # Wait and retry once
+            db = g._database = psycopg2.connect(DATABASE_URL)
+            
     return db
 
 @app.teardown_appcontext
@@ -33,9 +65,13 @@ def init_db():
     """Initialize the database schema."""
     with app.app_context():
         db = get_db()
+        cursor = db.cursor()
+        # Correct path to schema.sql from /app/server/server.py
         with app.open_resource('schema.sql', mode='r') as f:
-            db.cursor().executescript(f.read())
+            cursor.execute(f.read())
         db.commit()
+        cursor.close()
+        app.logger.info("Database tables initialized.")
 
 # --- AUTHENTICATION & DECORATORS ---
 
@@ -45,25 +81,26 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = None
         if 'Authorization' in request.headers:
-            # Expected format: "Bearer <token>"
             token = request.headers['Authorization'].split(" ")[1]
 
         if not token:
             return jsonify({'message': 'Token is missing!'}), 401
 
         try:
-            # Decode the token using the app's secret key
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
             db = get_db()
-            current_user = db.execute(
-                'SELECT * FROM users WHERE id = ?', (data['user_id'],)
-            ).fetchone()
+            cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cursor.execute(
+                'SELECT * FROM users WHERE id = %s', (data['user_id'],)
+            )
+            current_user = cursor.fetchone()
+            cursor.close()
             if not current_user:
                  return jsonify({'message': 'Token is invalid!'}), 401
         except jwt.ExpiredSignatureError:
             return jsonify({'message': 'Token has expired!'}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({'message': 'Token is invalid!'}), 401
+        except (jwt.InvalidTokenError, psycopg2.Error) as e:
+            return jsonify({'message': f'Token is invalid or DB error: {e}'}), 401
             
         return f(current_user, *args, **kwargs)
     return decorated
@@ -71,49 +108,50 @@ def token_required(f):
 # --- API ENDPOINTS ---
 
 @app.route('/register', methods=['POST'])
+@limiter.limit("10 per hour")
 def register_user():
-    """
-    Register a new user.
-    JSON: { "username": "...", "password": "..." }
-    """
     data = request.get_json()
     if not data or not data.get('username') or not data.get('password'):
         return jsonify({'message': 'Missing username or password'}), 400
 
     username = data.get('username')
-    # Hash the password for security
     password_hash = generate_password_hash(data.get('password'), method='pbkdf2:sha256')
 
     db = get_db()
     try:
-        db.execute(
-            'INSERT INTO users (username, password_hash) VALUES (?, ?)',
+        cursor = db.cursor()
+        cursor.execute(
+            'INSERT INTO users (username, password_hash) VALUES (%s, %s)',
             (username, password_hash)
         )
         db.commit()
+        cursor.close()
         return jsonify({'message': 'New user registered successfully!'}), 201
-    except sqlite3.IntegrityError:
+    except psycopg2.errors.UniqueViolation:
+        db.rollback()
         return jsonify({'message': 'Username already exists.'}), 409
+    except psycopg2.Error as e:
+        db.rollback()
+        return jsonify({'message': f'Database error: {e}'}), 500
 
 @app.route('/login', methods=['POST'])
+@limiter.limit("20 per hour")
 def login():
-    """
-    Log in a user and return a JWT token.
-    JSON: { "username": "...", "password": "..." }
-    """
     data = request.get_json()
     if not data or not data.get('username') or not data.get('password'):
         return jsonify({'message': 'Could not verify'}), 401
 
     db = get_db()
-    user = db.execute(
-        'SELECT * FROM users WHERE username = ?', (data['username'],)
-    ).fetchone()
+    cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor.execute(
+        'SELECT * FROM users WHERE username = %s', (data['username'],)
+    )
+    user = cursor.fetchone()
+    cursor.close()
 
     if not user or not check_password_hash(user['password_hash'], data['password']):
         return jsonify({'message': 'Could not verify! Check username/password.'}), 401
 
-    # Create a JWT token that expires in 24 hours
     token = jwt.encode({
         'user_id': user['id'],
         'username': user['username'],
@@ -125,41 +163,44 @@ def login():
 @app.route('/upload_key', methods=['POST'])
 @token_required
 def upload_key(current_user):
-    """
-    Upload or update a user's public key for E2EE.
-    Protected route. Requires "Authorization: Bearer <token>" header.
-    JSON: { "public_key": "..." }
-    """
     data = request.get_json()
     if not data or not data.get('public_key'):
         return jsonify({'message': 'Missing public_key'}), 400
 
     db = get_db()
-    # Use INSERT OR REPLACE to handle both new keys and updates
-    db.execute(
-        'INSERT OR REPLACE INTO public_keys (user_id, public_key) VALUES (?, ?)',
+    cursor = db.cursor()
+    # Use INSERT ... ON CONFLICT (user_id) DO UPDATE ...
+    cursor.execute(
+        """
+        INSERT INTO public_keys (user_id, public_key) VALUES (%s, %s)
+        ON CONFLICT (user_id) DO UPDATE SET public_key = EXCLUDED.public_key
+        """,
         (current_user['id'], data['public_key'])
     )
     db.commit()
+    cursor.close()
     return jsonify({'message': 'Public key uploaded successfully.'}), 200
 
 @app.route('/get_key', methods=['GET'])
 @token_required
 def get_key(current_user):
-    """
-    Get the public key for a given username.
-    Protected route. Requires token.
-    Query: /get_key?username=bob
-    """
     username_to_find = request.args.get('username')
     if not username_to_find:
         return jsonify({'message': 'Missing username query parameter.'}), 400
 
     db = get_db()
-    key_data = db.execute(
-        'SELECT pk.public_key FROM public_keys pk JOIN users u ON u.id = pk.user_id WHERE u.username = ?',
+    cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor.execute(
+        """
+        SELECT pk.public_key 
+        FROM public_keys pk 
+        JOIN users u ON u.id = pk.user_id 
+        WHERE u.username = %s
+        """,
         (username_to_find,)
-    ).fetchone()
+    )
+    key_data = cursor.fetchone()
+    cursor.close()
 
     if not key_data:
         return jsonify({'message': 'User not found or has no public key.'}), 404
@@ -168,139 +209,127 @@ def get_key(current_user):
 
 @app.route('/request_chat', methods=['POST'])
 @token_required
+@limiter.limit("30 per hour")
 def request_chat(current_user):
-    """
-    Send a chat request to another user.
-    This fulfills the "flag that user for a conversation request" logic.
-    JSON: { "recipient_username": "..." }
-    """
     data = request.get_json()
     recipient_username = data.get('recipient_username')
     if not recipient_username:
         return jsonify({'message': 'Missing recipient_username'}), 400
 
     db = get_db()
-    recipient = db.execute('SELECT id FROM users WHERE username = ?', (recipient_username,)).fetchone()
+    cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
+    cursor.execute('SELECT id FROM users WHERE username = %s', (recipient_username,))
+    recipient = cursor.fetchone()
     if not recipient:
+        cursor.close()
         return jsonify({'message': 'Recipient user not found.'}), 404
 
-    # Check if a request already exists
-    existing = db.execute(
-        'SELECT * FROM chat_requests WHERE requester_id = ? AND requested_id = ?',
-        (current_user['id'], recipient['id'])
-    ).fetchone()
-
-    if existing:
+    try:
+        cursor.execute(
+            'INSERT INTO chat_requests (requester_id, requested_id, status) VALUES (%s, %s, %s)',
+            (current_user['id'], recipient['id'], 'pending')
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({'message': f'Chat request sent to {recipient_username}.'}), 201
+    except psycopg2.errors.UniqueViolation:
+        db.rollback()
+        cursor.close()
         return jsonify({'message': 'Chat request already pending or accepted.'}), 409
-
-    db.execute(
-        'INSERT INTO chat_requests (requester_id, requested_id, status) VALUES (?, ?, ?)',
-        (current_user['id'], recipient['id'], 'pending')
-    )
-    db.commit()
-    return jsonify({'message': f'Chat request sent to {recipient_username}.'}), 201
 
 @app.route('/get_chat_requests', methods=['GET'])
 @token_required
 def get_chat_requests(current_user):
-    """
-    Get all pending chat requests for the logged-in user.
-    """
     db = get_db()
-    requests = db.execute(
+    cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor.execute(
         """
         SELECT u.username AS requester_username, cr.status
         FROM chat_requests cr
         JOIN users u ON u.id = cr.requester_id
-        WHERE cr.requested_id = ? AND cr.status = 'pending'
+        WHERE cr.requested_id = %s AND cr.status = 'pending'
         """, (current_user['id'],)
-    ).fetchall()
+    )
+    requests = cursor.fetchall()
+    cursor.close()
     
-    # Convert list of Row objects to a list of dicts
     pending_requests = [dict(row) for row in requests]
     return jsonify({'pending_requests': pending_requests})
 
 @app.route('/accept_chat', methods=['POST'])
 @token_required
+@limiter.limit("30 per hour")
 def accept_chat(current_user):
-    """
-    Accept a pending chat request.
-    This "activates" the conversation.
-    JSON: { "requester_username": "..." }
-    """
     data = request.get_json()
     requester_username = data.get('requester_username')
     if not requester_username:
         return jsonify({'message': 'Missing requester_username'}), 400
 
     db = get_db()
-    requester = db.execute('SELECT id FROM users WHERE username = ?', (requester_username,)).fetchone()
+    cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    
+    cursor.execute('SELECT id FROM users WHERE username = %s', (requester_username,))
+    requester = cursor.fetchone()
     if not requester:
+        cursor.close()
         return jsonify({'message': 'Requester user not found.'}), 404
         
-    # --- FIX: Capture the cursor object ---
-    cursor = db.execute(
+    cursor.execute(
         """
         UPDATE chat_requests
         SET status = 'accepted'
-        WHERE requester_id = ? AND requested_id = ? AND status = 'pending'
+        WHERE requester_id = %s AND requested_id = %s AND status = 'pending'
         """,
         (requester['id'], current_user['id'])
     )
-    db.commit()
     
-    # --- FIX: Check the cursor.rowcount attribute ---
-    if cursor.rowcount == 0:
+    rowcount = cursor.rowcount
+    db.commit()
+    cursor.close()
+    
+    if rowcount == 0:
         return jsonify({'message': 'No pending request found from that user.'}), 404
         
     return jsonify({'message': f'Chat request from {requester_username} accepted!'}), 200
 
-
 @app.route('/get_contacts', methods=['GET'])
 @token_required
 def get_contacts(current_user):
-    """
-    Get all users with whom the current user has an 'accepted' chat.
-    This includes chats they requested and chats they accepted.
-    """
     db = get_db()
+    cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
     my_id = current_user['id']
     
-    # Find users I requested and were accepted
-    i_requested = db.execute(
+    cursor.execute(
         """
         SELECT u.username
         FROM chat_requests cr
         JOIN users u ON u.id = cr.requested_id
-        WHERE cr.requester_id = ? AND cr.status = 'accepted'
+        WHERE cr.requester_id = %s AND cr.status = 'accepted'
         """, (my_id,)
-    ).fetchall()
+    )
+    i_requested = cursor.fetchall()
     
-    # Find users who requested me and I accepted
-    they_requested = db.execute(
+    cursor.execute(
         """
         SELECT u.username
         FROM chat_requests cr
         JOIN users u ON u.id = cr.requester_id
-        WHERE cr.requested_id = ? AND cr.status = 'accepted'
+        WHERE cr.requested_id = %s AND cr.status = 'accepted'
         """, (my_id,)
-    ).fetchall()
+    )
+    they_requested = cursor.fetchall()
+    cursor.close()
 
-    # Combine the lists and remove duplicates
     contacts = set(row['username'] for row in i_requested)
     contacts.update(row['username'] for row in they_requested)
     
     return jsonify({'contacts': list(contacts)})
 
-
 @app.route('/send_message', methods=['POST'])
 @token_required
+@limiter.limit("100 per hour")
 def send_message(current_user):
-    """
-    Send an encrypted message to a user.
-    The server stores a blob for the sender and one for the recipient.
-    JSON: { "recipient_username": "...", "sender_blob": "...", "recipient_blob": "..." }
-    """
     data = request.get_json()
     recipient_username = data.get('recipient_username')
     sender_blob = data.get('sender_blob')
@@ -310,46 +339,45 @@ def send_message(current_user):
         return jsonify({'message': 'Missing recipient_username, sender_blob, or recipient_blob'}), 400
 
     db = get_db()
-    recipient = db.execute('SELECT id FROM users WHERE username = ?', (recipient_username,)).fetchone()
-    if not recipient:
-        return jsonify({'message': 'Recipient user not found.'}), 404
-
-    # Here you might check if the chat is "active" (request accepted)
-    # For simplicity, we'll allow any user to message any other user for now.
+    cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
     
-    db.execute(
-        'INSERT INTO messages (sender_id, recipient_id, sender_blob, recipient_blob, timestamp) VALUES (?, ?, ?, ?, ?)',
-        (current_user['id'], recipient['id'], sender_blob, recipient_blob, datetime.datetime.now(datetime.timezone.utc))
+    cursor.execute('SELECT id FROM users WHERE username = %s', (recipient_username,))
+    recipient = cursor.fetchone()
+    if not recipient:
+        cursor.close()
+        return jsonify({'message': 'Recipient user not found.'}), 404
+    
+    cursor.execute(
+        # We can omit 'timestamp' and let the DB default handle it
+        'INSERT INTO messages (sender_id, recipient_id, sender_blob, recipient_blob) VALUES (%s, %s, %s, %s)',
+        (current_user['id'], recipient['id'], sender_blob, recipient_blob)
     )
     db.commit()
+    cursor.close()
     return jsonify({'message': 'Message sent successfully.'}), 201
 
 @app.route('/get_messages', methods=['GET'])
 @token_required
 def get_messages(current_user):
-    """
-    Get all messages between the logged-in user and another user.
-    Query: /get_messages?username=bob
-    Query (optional): /get_messages?username=bob&since_id=10
-    """
     partner_username = request.args.get('username')
-    # Get since_id, default to 0 if not provided
     since_id = request.args.get('since_id', 0, type=int) 
     
     if not partner_username:
         return jsonify({'message': 'Missing username query parameter.'}), 400
 
     db = get_db()
-    partner = db.execute('SELECT id FROM users WHERE username = ?', (partner_username,)).fetchone()
+    cursor = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
+    cursor.execute('SELECT id FROM users WHERE username = %s', (partner_username,))
+    partner = cursor.fetchone()
     if not partner:
+        cursor.close()
         return jsonify({'message': 'Partner user not found.'}), 404
 
     my_id = current_user['id']
     partner_id = partner['id']
 
-    # --- UPDATED QUERY ---
-    # We add the "AND m.id > ?" to the WHERE clause
-    messages_rows = db.execute(
+    cursor.execute(
         """
         SELECT 
             m.id, 
@@ -358,19 +386,20 @@ def get_messages(current_user):
             m.timestamp, 
             u_sender.username AS sender_username,
             CASE
-                WHEN m.sender_id = ? THEN m.sender_blob
+                WHEN m.sender_id = %s THEN m.sender_blob
                 ELSE m.recipient_blob
             END AS encrypted_blob
         FROM messages m
         JOIN users u_sender ON u_sender.id = m.sender_id
         WHERE 
-            ((m.sender_id = ? AND m.recipient_id = ?) OR (m.sender_id = ? AND m.recipient_id = ?))
-            AND m.id > ?
+            ((m.sender_id = %s AND m.recipient_id = %s) OR (m.sender_id = %s AND m.recipient_id = %s))
+            AND m.id > %s
         ORDER BY m.timestamp ASC
         """,
-        # Parameters match the '?' marks in order
         (my_id, my_id, partner_id, partner_id, my_id, since_id)
-    ).fetchall()
+    )
+    messages_rows = cursor.fetchall()
+    cursor.close()
 
     messages = [dict(row) for row in messages_rows]
     return jsonify({'messages': messages})
@@ -378,7 +407,11 @@ def get_messages(current_user):
 # --- Main ---
 
 if __name__ == '__main__':
+    # Give the DB a moment to start, just in case.
+    # The healthcheck in docker-compose is the real solution,
+    # but this doesn't hurt.
+    time.sleep(3) 
     print("Initializing database...")
-    init_db() # Create the database tables if they don't exist
-    print("Starting Flask server at http://127.0.0.1:5000")
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    init_db()
+    print("Starting Flask server at http://0.0.0.0:5000")
+    app.run(debug=True, host='0.0.0.0', port=5000)

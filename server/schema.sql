@@ -1,6 +1,6 @@
 -- User table
 CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL
 );
@@ -9,28 +9,29 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS public_keys (
     user_id INTEGER PRIMARY KEY,
     public_key TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users (id)
+    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 -- Chat requests to manage connections
 CREATE TABLE IF NOT EXISTS chat_requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     requester_id INTEGER NOT NULL,
     requested_id INTEGER NOT NULL,
     status TEXT NOT NULL, -- 'pending', 'accepted', 'blocked'
-    FOREIGN KEY (requester_id) REFERENCES users (id),
-    FOREIGN KEY (requested_id) REFERENCES users (id),
+    FOREIGN KEY (requester_id) REFERENCES users (id) ON DELETE CASCADE,
+    FOREIGN KEY (requested_id) REFERENCES users (id) ON DELETE CASCADE,
     UNIQUE(requester_id, requested_id)
 );
 
 -- Messages table
 CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     sender_id INTEGER NOT NULL,
     recipient_id INTEGER NOT NULL,
     sender_blob TEXT NOT NULL,
     recipient_blob TEXT NOT NULL,
-    timestamp DATETIME NOT NULL,
-    FOREIGN KEY (sender_id) REFERENCES users (id),
-    FOREIGN KEY (recipient_id) REFERENCES users (id)
+    -- Use TIMESTAMPTZ for timezone-aware timestamps
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'),
+    FOREIGN KEY (sender_id) REFERENCES users (id) ON DELETE CASCADE,
+    FOREIGN KEY (recipient_id) REFERENCES users (id) ON DELETE CASCADE
 );

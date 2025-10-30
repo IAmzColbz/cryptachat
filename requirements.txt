@@ -1,3 +1,6 @@
 Flask
 PyJWT
 Werkzeug
+flask-limiter
+psycopg2-binary
+python-dotenv
