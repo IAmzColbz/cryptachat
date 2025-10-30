@@ -25,7 +25,7 @@ func main() {
 
 	// *** FIX: Changed path from "../server/schema.sql" to "./server/schema.sql" ***
 	// This path is now correct relative to the binary's location in the /app container directory
-	dbStore, err := store.NewPostgresStore(cfg.DatabaseURL, "./server/schema.sql")
+	dbStore, err := store.NewPostgresStore(cfg.DatabaseURL, "./store/schema.sql")
 	if err != nil {
 		log.Fatalf("FATAL: could not connect to database: %v", err)
 	}
