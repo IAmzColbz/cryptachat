@@ -1,25 +1,31 @@
-FROM continuumio/miniconda3:25.3.1-1
-
-# Set the working directory for the application
+# Stage 1: Builder
+# Use an official Go image. Using 1.22-alpine as an example.
+FROM golang:1.22-alpine AS builder
 WORKDIR /app
 
-# 1. Copy and create the conda env
-COPY environment.yml .
-RUN conda env create -f environment.yml
+# Copy module files and download dependencies first
+# This leverages Docker's build cache
+COPY src/go.mod src/go.sum ./
+RUN go mod download
 
-# 2. Activate the env for BUILD-TIME commands
-SHELL ["conda", "run", "-n", "venv", "/bin/bash", "-c"]
+# Copy the rest of the Go source code
+# This copies main.go, config/, http/, store/ into /app
+COPY src/ ./ 
 
-# 3. Copy and install pip requirements
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# Build the static, production-ready binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o /cryptachat-server ./main.go
 
-# 4. Copy the rest of the application code
-# (This copies the 'server' folder into /app/server)
-COPY . .
+# Stage 2: Final Image
+FROM alpine:latest
+WORKDIR /app
 
+# Copy the built binary from the builder stage
+COPY --from=builder /cryptachat-server .
+# *** FIX: Update to new schema path in the final image ***
+COPY --from=builder /app/store/schema.sql ./store/schema.sql
+
+# Expose the port the Go server listens on
 EXPOSE 5000
 
-# 5. Correct CMD
-# Runs 'python server/server.py' from the /app directory
-CMD ["/opt/conda/envs/venv/bin/python", "server/server.py"]
+# Run the server
+CMD ["./cryptachat-server"]
